@@ -9,19 +9,20 @@ import java.util.concurrent.Future;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.FutureTask;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
+
 
 class TaskExecutorImpl implements Main.TaskExecutor {
     private final ExecutorService executor;
     private final BlockingQueue<FutureTask<?>> taskQueue;
+    private final ConcurrentHashMap<Main.TaskGroup, ReentrantLock> groupLocks = new ConcurrentHashMap<>();
     private Thread singleDispatcherThread;
+
 
     public TaskExecutorImpl(int poolSize, int queueSize) {
         this.executor = Executors.newFixedThreadPool(poolSize);
@@ -34,7 +35,16 @@ class TaskExecutorImpl implements Main.TaskExecutor {
             throw new IllegalArgumentException("Task must not be null");
         }
 
-        FutureTask<T> futureTask = new FutureTask<>(task.taskAction());
+        FutureTask<T> futureTask = new FutureTask<>(() -> {
+            ReentrantLock lock = groupLocks.computeIfAbsent(task.taskGroup(), g -> new ReentrantLock());
+            lock.lock();
+            try {
+                return task.taskAction().call();
+            } finally {
+                lock.unlock();
+            }
+        });
+
 
         if(!taskQueue.offer(futureTask)) {
             throw new RuntimeException("Task queue is full");
