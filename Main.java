@@ -15,6 +15,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.RejectedExecutionException;
 
 
 class TaskExecutorImpl implements Main.TaskExecutor {
@@ -22,6 +23,7 @@ class TaskExecutorImpl implements Main.TaskExecutor {
     private final BlockingQueue<FutureTask<?>> taskQueue;
     private final ConcurrentHashMap<Main.TaskGroup, ReentrantLock> groupLocks = new ConcurrentHashMap<>();
     private Thread singleDispatcherThread;
+    private volatile boolean isRunning = true;
 
 
     public TaskExecutorImpl(int poolSize, int queueSize) {
@@ -40,6 +42,9 @@ class TaskExecutorImpl implements Main.TaskExecutor {
             lock.lock();
             try {
                 return task.taskAction().call();
+            } catch (Exception e) {
+                System.err.println("Task Failed. TaskID=" + task.taskUUID() + " --- " + e.getMessage());
+                throw new ExecutionException("Task Execution failed for the task " + task.taskUUID(), e);
             } finally {
                 lock.unlock();
             }
@@ -47,14 +52,16 @@ class TaskExecutorImpl implements Main.TaskExecutor {
 
 
         if(!taskQueue.offer(futureTask)) {
-            throw new RuntimeException("Task queue is full");
+            String msg = "Task queue is full, unable to new accept task: " + task.taskUUID();
+            System.err.println(msg);
+            throw new RejectedExecutionException(msg);
         }
         return futureTask;
     }
 
     public void startExecution() {
         Runnable dispatchWork = () -> {
-            while (true) {
+            while (isRunning) {
                 try {
                     FutureTask<?> task = taskQueue.take();
                     if (task != null) {
@@ -62,19 +69,49 @@ class TaskExecutorImpl implements Main.TaskExecutor {
                     }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
+                    System.out.println("Dispatcher Thread interrupted. Stopping gracefully...");
                     break;
+                } catch (RejectedExecutionException e) {
+                    System.err.println("Task rejected by executor: " + e.getMessage());
+                } catch (Exception e) {
+                    System.err.println("Unexpected error in dispatcher: " + e.getMessage());
                 }
             }
         };
-        singleDispatcherThread = new Thread(dispatchWork);
+        singleDispatcherThread = new Thread(dispatchWork, "Task-Dispatcher");
+        singleDispatcherThread.setDaemon(true);
         singleDispatcherThread.start();
+        System.out.println("Dispatcher thread started");
     }
 
     public void shutdown() {
+        isRunning = false;
         if (singleDispatcherThread != null) {
             singleDispatcherThread.interrupt();
+            try {
+                singleDispatcherThread.join(2000);
+                System.out.println("Dispatcher thread terminated.");
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                System.err.println("Interrupted while waiting for dispatcher to stop.");
+            }
         }
+
         executor.shutdown();
+        System.out.println("Shutdown initiated. Waiting for tasks to complete...");
+        try {
+            if (!executor.awaitTermination(15, TimeUnit.SECONDS)) {
+                System.err.println("Forcing shutdown: Not all tasks terminated in time");
+                executor.shutdownNow();
+            } else {
+                System.out.println("All tasks completed, executor shutdown cleanly.");
+            }
+        } catch (InterruptedException e) {
+            System.err.println("Shutdown interrupted, forcing shutdown");
+            executor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+        System.out.println("Executor service shutdown complete");
     }
 }
 
@@ -96,8 +133,6 @@ public class Main {
          * @return Future for the task asynchronous computation result.
          */
         <T> Future<T> submitTask(Task<T> task);
-        void shutdown();
-        void startExecution();
     }
 
     /**
@@ -136,7 +171,7 @@ public class Main {
         }
     }
     public static void main(String[] args) {
-        TaskExecutor executor = new TaskExecutorImpl(10, 100);
+        TaskExecutorImpl executor = new TaskExecutorImpl(10, 100);
 
         TaskGroup group1 = new TaskGroup(UUID.randomUUID());
         TaskGroup group2 = new TaskGroup(UUID.randomUUID());
