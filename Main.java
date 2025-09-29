@@ -38,20 +38,20 @@ class TaskExecutorImpl implements Main.TaskExecutor {
         }
 
         FutureTask<T> futureTask = new FutureTask<>(() -> {
-            ReentrantLock lock = groupLocks.computeIfAbsent(task.taskGroup(), g -> new ReentrantLock());
+            ReentrantLock lock = groupLocks.computeIfAbsent(task.taskGroup(), g -> new ReentrantLock(true));
             lock.lock();
             try {
                 return task.taskAction().call();
             } catch (Exception e) {
-                System.err.println("Task Failed. TaskID=" + task.taskUUID() + " --- " + e.getMessage());
-                throw new ExecutionException("Task Execution failed for the task " + task.taskUUID(), e);
+                System.err.println("Task execution failed. TaskID=" + task.taskUUID() + " | " + e.getMessage());
+                throw new ExecutionException("Execution failed for task " + task.taskUUID(), e);
             } finally {
                 lock.unlock();
             }
         });
 
 
-        if(!taskQueue.offer(futureTask)) {
+        if (!taskQueue.offer(futureTask)) {
             String msg = "Task queue is full, unable to new accept task: " + task.taskUUID();
             System.err.println(msg);
             throw new RejectedExecutionException(msg);
@@ -69,7 +69,7 @@ class TaskExecutorImpl implements Main.TaskExecutor {
                     }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
-                    System.out.println("Dispatcher Thread interrupted. Stopping gracefully...");
+                    System.out.println("Dispatcher interrupted. Stopping gracefully...");
                     break;
                 } catch (RejectedExecutionException e) {
                     System.err.println("Task rejected by executor: " + e.getMessage());
@@ -178,39 +178,81 @@ public class Main {
 
         Task t1 = new Task<>(UUID.randomUUID(), group1, TaskType.READ, () -> {
             Thread.sleep(1000);
-            return "Task 1 completed";
+            return "Task 1 --- group1 completed";
         });
 
         Task t2 = new Task<>(UUID.randomUUID(), group1, TaskType.WRITE, () -> {
             Thread.sleep(2000);
-            return "Task 2 completed";
+            return "Task 1 --- group2 completed";
         });
 
-        Task t3 = new Task<>(UUID.randomUUID(), group2, TaskType.WRITE, () -> {
-            Thread.sleep(5000);
-            return "Task 3 completed";
+        Task t3 = new Task<>(UUID.randomUUID(), group1, TaskType.READ, () -> {
+            Thread.sleep(500);
+            return "Task 2 --- group1 completed";
         });
-        Task t4 = new Task<>(UUID.randomUUID(), group2, TaskType.READ, () -> {
+
+        Task t4 = new Task<>(UUID.randomUUID(), group2, TaskType.WRITE, () -> {
+            Thread.sleep(3000);
+            return "Task 3 --- group1 completed";
+        });
+
+        Task t5 = new Task<>(UUID.randomUUID(), group2, TaskType.WRITE, () -> {
+            Thread.sleep(3000);
+            return "Task 2 --- group2 completed";
+        });
+        Task t6 = new Task<>(UUID.randomUUID(), group2, TaskType.READ, () -> {
             Thread.sleep(1000);
-            return "Task 4 completed";
+            return "Task 3 --- group2 completed";
+        });
+
+        Task t7 = new Task<>(UUID.randomUUID(), group1, TaskType.READ, () -> {
+            Thread.sleep(2000);
+            return "Task 4 --- group1 completed";
+        });
+
+        Task t8 = new Task<>(UUID.randomUUID(), group1, TaskType.READ, () -> {
+            Thread.sleep(1000);
+            return "Task 4 --- group2 completed";
         });
 
 
-        List<Future<String>> futures = new ArrayList<>();
 
-        List<Task<String>> tasks = List.of(t1, t2, t3, t4);
-        for (Task<String> task : tasks) {
-            futures.add(executor.submitTask(task));
-        }
+
+        // Start the Dispatcher Thread....
         executor.startExecution();
 
-        try {
-            for (Future<String> future : futures) {
-                System.out.println(future.get());
+        List<Future<String>> futures = new ArrayList<>();
+        List<Task<String>> tasks = List.of(t1, t2, t3, t4, t5, t6, t7, t8);
+
+        // Submit the Task
+        for (Task<String> task : tasks) {
+            try {
+                futures.add(executor.submitTask(task));
+            } catch (RejectedExecutionException e) {
+                System.out.println("Task rejected: " + e.getMessage());
+                try {
+                    Thread.sleep(500);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    System.out.println("Main thread interrupted during sleep.");
+                }
             }
-        } catch (InterruptedException | ExecutionException e) {
-            e.printStackTrace();
         }
+        
+        // Fetch the Results..
+        for (Future<String> future : futures) {
+            try {
+                System.out.println(future.get());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                System.out.println("Main thread interrupted while waiting for task.");
+            } catch (ExecutionException e) {
+                System.out.println("Task failed: " + e.getCause().getMessage());
+            }
+        }
+
+        //ShutDown the ExecutorService and Dispatcher Thread..
         executor.shutdown();
+        System.out.println("Main finished.");
     }
 }
